@@ -1,0 +1,5 @@
+# Runtime — middleware + mock Northstar
+fastapi==0.136.1
+uvicorn[standard]==0.47.0
+httpx==0.28.1
+pydantic-settings==2.14.1
