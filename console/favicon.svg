@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="RapidSOS">
+  <rect width="32" height="32" rx="6" fill="#231F2E"/>
+  <path d="M8 18h8v8h4V18h8v-4H20V6h-4v8H8v4z" fill="#E21F26"/>
+  <path d="M16 6h8v8h4v4H24v8h-4V18h-8v8h-4V18H8v-4h8V6z" fill="#29ABE2" opacity="0.95"/>
+</svg>
