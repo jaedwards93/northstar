@@ -16,6 +16,12 @@ class MessageDirection(StrEnum):
     OUTBOUND = "outbound"
 
 
+class AgencyTag(StrEnum):
+    FIRE = "fire"
+    MEDICAL = "medical"
+    POLICE = "police"
+
+
 class Message(BaseModel):
     id: str
     direction: MessageDirection
@@ -31,6 +37,7 @@ class Session(BaseModel):
     status: SessionStatus = SessionStatus.ACTIVE
     last_activity_at: datetime
     messages: list[Message] = Field(default_factory=list)
+    agency_tags: list[AgencyTag] = Field(default_factory=list)
 
 
 # --- Northstar inbound: POST /inbound ---
@@ -57,6 +64,33 @@ class SessionSummary(BaseModel):
     status: SessionStatus
     preview: str | None = None
     timestamp: datetime | None = None
+    last_activity_at: datetime
+
+
+class PhoneSummary(BaseModel):
+    """GET /sessions?group_by_phone=true — one row per caller."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_number: str = Field(alias="from")
+    current_session_id: str
+    status: SessionStatus
+    preview: str | None = None
+    timestamp: datetime | None = None
+    last_inbound_at: datetime | None = None
+    last_activity_at: datetime
+    agency_tags: list[AgencyTag] = Field(default_factory=list)
+
+
+class SessionBlock(BaseModel):
+    """Prior session for the same phone (read-only context)."""
+
+    id: str
+    status: SessionStatus
+    started_at: datetime
+    expired_at: datetime
+    messages: list[Message]
+    agency_tags: list[AgencyTag] = Field(default_factory=list)
 
 
 class SessionDetail(BaseModel):
@@ -69,6 +103,15 @@ class SessionDetail(BaseModel):
     status: SessionStatus
     last_activity_at: datetime
     messages: list[Message]
+    previous_sessions: list[SessionBlock] = Field(default_factory=list)
+    is_reply_target: bool = False
+    agency_tags: list[AgencyTag] = Field(default_factory=list)
+
+
+class SessionTagsRequest(BaseModel):
+    """PATCH /sessions/{id}/tags"""
+
+    tags: list[AgencyTag] = Field(default_factory=list)
 
 
 class AgentReplyRequest(BaseModel):
@@ -80,6 +123,12 @@ class AgentReplyRequest(BaseModel):
 class AgentReplyResponse(BaseModel):
     success: bool
     error: str | None = None
+    delivery_attempts: int = 0
+
+
+class ConsoleConfig(BaseModel):
+    session_ttl_seconds: int
+    session_expiring_soon_seconds: int
 
 
 class ErrorResponse(BaseModel):

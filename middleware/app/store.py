@@ -32,11 +32,18 @@ class InMemoryStore:
         return self.sessions_by_id.get(session_id)
 
     def put_session(self, session: Session) -> None:
-        self.sessions_by_phone[session.phone] = session
         self.sessions_by_id[session.id] = session
+        current = self.sessions_by_phone.get(session.phone)
+        if current is None or current.id == session.id:
+            self.sessions_by_phone[session.phone] = session
 
     def list_sessions(self) -> list[Session]:
+        """Current session per phone (inbound/reply target)."""
         return list(self.sessions_by_phone.values())
+
+    def list_all_sessions(self) -> list[Session]:
+        """Every stored session, including superseded expired ones."""
+        return list(self.sessions_by_id.values())
 
     def get_inbound_result(self, idempotency_key: str) -> InboundProcessResult | None:
         return self.seen_inbound.get(idempotency_key)

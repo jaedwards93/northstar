@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Console — Text-to-911</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar" aria-label="Sessions">
+        <header class="sidebar-header">
+          <h1>Agent Console</h1>
+          <p class="subtitle">Text-to-911</p>
+        </header>
+
+        <div class="filters" aria-label="Session filters">
+          <label class="filter-label">
+            <span class="filter-label-text">Status</span>
+            <select id="filter-status" class="filter-select">
+              <option value="all">All</option>
+              <option value="active">Active</option>
+              <option value="expiring">Expiring Soon</option>
+              <option value="expired">Expired</option>
+            </select>
+          </label>
+          <label class="filter-label">
+            <span class="filter-label-text">Read</span>
+            <select id="filter-read" class="filter-select">
+              <option value="all">All</option>
+              <option value="unread">Unread</option>
+              <option value="read">Read</option>
+            </select>
+          </label>
+          <div class="filter-label">
+            <span class="filter-label-text">Agency Deployed</span>
+            <details class="agency-filter" id="agency-filter">
+              <summary class="agency-filter-trigger" id="agency-filter-label">
+                All
+              </summary>
+              <div class="agency-filter-menu">
+                <label class="agency-filter-option">
+                  <input type="checkbox" value="all" data-agency-filter="all" checked />
+                  All
+                </label>
+                <label class="agency-filter-option">
+                  <input type="checkbox" value="fire" data-agency-filter="tag" />
+                  Fire
+                </label>
+                <label class="agency-filter-option">
+                  <input type="checkbox" value="medical" data-agency-filter="tag" />
+                  Medical
+                </label>
+                <label class="agency-filter-option">
+                  <input type="checkbox" value="police" data-agency-filter="tag" />
+                  Police
+                </label>
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <div class="sidebar-scroll">
+          <ul id="session-list" class="session-list" aria-label="Session list"></ul>
+        </div>
+
+        <div class="sidebar-brand">
+          <div class="sidebar-brand-card">
+            <img src="rapidsos-logo.png" alt="RapidSOS" />
+          </div>
+        </div>
+      </aside>
+
+      <main class="main" aria-label="Conversation">
+        <div id="conversation" class="conversation">
+          <header class="conversation-header">
+            <div class="conversation-header-inner">
+              <h2 id="session-phone" class="session-phone"></h2>
+              <span id="session-status" class="status-badge"></span>
+              <span id="session-expiry" class="session-expiry" aria-live="polite"></span>
+            </div>
+          </header>
+
+          <div id="expired-banner" class="banner banner-expired hidden" role="alert" hidden></div>
+          <div id="global-error" class="banner banner-error hidden" role="alert" hidden></div>
+
+          <div id="messages" class="messages" aria-live="polite"></div>
+
+          <footer class="reply-bar">
+            <div class="reply-bar-inner">
+              <fieldset class="session-type" id="session-type-fieldset">
+                <legend class="session-type-legend">Agency Deployed</legend>
+                <label class="session-type-option">
+                  <input type="checkbox" name="agency-tag" value="fire" />
+                  Fire
+                </label>
+                <label class="session-type-option">
+                  <input type="checkbox" name="agency-tag" value="medical" />
+                  Medical
+                </label>
+                <label class="session-type-option">
+                  <input type="checkbox" name="agency-tag" value="police" />
+                  Police
+                </label>
+              </fieldset>
+              <div class="reply-main">
+                <label class="sr-only" for="reply-input">Reply to caller</label>
+                <textarea
+                  id="reply-input"
+                  rows="2"
+                  placeholder="Type agent reply…"
+                  maxlength="1600"
+                ></textarea>
+                <div class="reply-actions">
+                  <span id="reply-feedback" class="reply-feedback" aria-live="polite"></span>
+                  <button type="button" id="send-btn" class="btn-send">Send</button>
+                </div>
+              </div>
+            </div>
+          </footer>
+        </div>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

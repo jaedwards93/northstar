@@ -12,7 +12,11 @@ from middleware.app.models import (
     Session,
     SessionStatus,
 )
-from middleware.app.services.sessions import is_session_expired
+from middleware.app.services.sessions import (
+    get_sessions_for_phone,
+    is_session_expired,
+    resolve_inbound_session,
+)
 from middleware.app.store import InboundProcessResult, get_store
 
 
@@ -40,6 +44,7 @@ async def handle_inbound(payload: InboundWebhookRequest) -> InboundResult:
     phone = payload.from_number.strip()
     at = _as_utc(payload.timestamp)
     idempotency_key = make_idempotency_key(phone, payload.text, payload.timestamp)
+    ttl = settings.session_ttl_seconds
 
     async with store.lock:
         prior = store.get_inbound_result(idempotency_key)
@@ -50,10 +55,14 @@ async def handle_inbound(payload: InboundWebhookRequest) -> InboundResult:
                 duplicate=True,
             )
 
-        session = store.get_session_by_phone(phone)
-        if session is None or is_session_expired(
-            session, at, settings.session_ttl_seconds
-        ):
+        session = resolve_inbound_session(store, phone, at, ttl)
+        if session is None:
+            for old in get_sessions_for_phone(store, phone):
+                if old.status != SessionStatus.EXPIRED:
+                    if is_session_expired(old, at, ttl):
+                        store.put_session(
+                            old.model_copy(update={"status": SessionStatus.EXPIRED})
+                        )
             session = Session(
                 id=str(uuid.uuid4()),
                 phone=phone,

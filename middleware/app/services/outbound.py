@@ -104,10 +104,12 @@ async def send_reply(session_id: str, text: str) -> AgentReplyResponse:
         phone = session.phone
         sid = session.id
 
-    success, _attempts, error = await deliver_to_northstar(
+    success, attempts, error = await deliver_to_northstar(
         to_number=phone,
         from_number=settings.reply_from_number,
         text=text,
         session_id=sid,
     )
-    return AgentReplyResponse(success=success, error=error)
+    return AgentReplyResponse(
+        success=success, error=error, delivery_attempts=attempts
+    )
