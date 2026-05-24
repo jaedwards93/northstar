@@ -381,7 +381,7 @@ body {
   font-weight: 500;
 }
 
-.banner.hidden {
+.banner[hidden] {
   display: none;
 }
 

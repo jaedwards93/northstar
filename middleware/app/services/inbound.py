@@ -2,7 +2,7 @@
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 from middleware.app.config import get_settings
 from middleware.app.models import (
@@ -18,6 +18,7 @@ from middleware.app.services.sessions import (
     resolve_inbound_session,
 )
 from middleware.app.store import InboundProcessResult, get_store
+from shared.session_policy import as_utc
 
 
 @dataclass(frozen=True)
@@ -32,18 +33,12 @@ def make_idempotency_key(from_number: str, text: str, timestamp: datetime) -> st
     return f"{from_number}|{text}|{timestamp.isoformat()}"
 
 
-def _as_utc(dt: datetime) -> datetime:
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
 async def handle_inbound(payload: InboundWebhookRequest) -> InboundResult:
     store = get_store()
     settings = get_settings()
     phone = payload.from_number.strip()
-    at = _as_utc(payload.timestamp)
-    idempotency_key = make_idempotency_key(phone, payload.text, payload.timestamp)
+    at = as_utc(payload.timestamp)
+    idempotency_key = make_idempotency_key(phone, payload.text, at)
     ttl = settings.session_ttl_seconds
 
     async with store.lock:

@@ -1,17 +1,14 @@
-"""Shared session expiry and UI status rules (middleware + console via /config)."""
+"""Shared session expiry rules (middleware + console via /config)."""
 
 from datetime import datetime, timedelta, timezone
-from enum import StrEnum
 
 # Demo / POC defaults (middleware Settings and harness use these).
 SESSION_TTL_SECONDS = 300  # 5 minutes
 SESSION_EXPIRING_SOON_SECONDS = 120  # "Expiring Soon" when less than this remains
 
 
-class UiSessionStatus(StrEnum):
-    ACTIVE = "active"
-    EXPIRING = "expiring"
-    EXPIRED = "expired"
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def as_utc(dt: datetime) -> datetime:
@@ -35,24 +32,3 @@ def is_expired(
         return True
     elapsed = (as_utc(at) - as_utc(last_activity_at)).total_seconds()
     return elapsed > ttl_seconds
-
-
-def ui_status(
-    *,
-    status: str,
-    last_activity_at: datetime,
-    at: datetime,
-    ttl_seconds: int,
-    expiring_soon_seconds: int,
-) -> UiSessionStatus:
-    if is_expired(
-        status=status,
-        last_activity_at=last_activity_at,
-        at=at,
-        ttl_seconds=ttl_seconds,
-    ):
-        return UiSessionStatus.EXPIRED
-    remaining = (expires_at(last_activity_at, ttl_seconds) - as_utc(at)).total_seconds()
-    if remaining < expiring_soon_seconds:
-        return UiSessionStatus.EXPIRING
-    return UiSessionStatus.ACTIVE

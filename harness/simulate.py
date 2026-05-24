@@ -8,15 +8,10 @@ Services must already be running (separate terminal):
 Run scenarios (staggered over the first 5 minutes):
 
   python harness/simulate.py
-
-Step through messages manually (scenarios still staggered; long TTL waits move to Phase 2):
-
-  python harness/simulate.py --step
 """
 
 from __future__ import annotations
 
-import argparse
 import random
 import secrets
 import sys
@@ -76,31 +71,8 @@ _STREET_NAMES = (
 _STREET_SUFFIXES = ("", " Apt 2", " Apt 4B", " Unit 12", " #3")
 
 _shutdown = threading.Event()
-_step_mode = False
-_program_start = 0.0
-_stdin_lock = threading.Lock()
-_step_ctx = threading.local()
-
-# Step-mode presentation estimates (Enter before each inbound/outbound in Phase 1).
-STEP_MODE_MESSAGES_PHASE1 = 58
-STEP_MODE_SEC_PER_ENTER_EST = 12.0
 
 ScenarioFn = Callable[[], None]
-
-
-@dataclass(frozen=True)
-class DeferredStep:
-    scenario_id: str
-    title: str
-    label: str
-    run: Callable[[], None]
-    not_before: float
-    order: int
-
-
-_deferred_lock = threading.Lock()
-_deferred_steps: list[DeferredStep] = []
-_deferred_order = 0
 
 
 @dataclass(frozen=True)
@@ -181,91 +153,24 @@ def log(scenario_id: str, title: str, message: str) -> None:
     print(f"[Scenario {scenario_id} — {title}] {message}")
 
 
-def _step_prefix() -> str:
-    sid = getattr(_step_ctx, "scenario_id", None)
-    name = getattr(_step_ctx, "title", None)
-    if sid and name:
-        return f"[Scenario {sid} — {name}] "
-    return ""
-
-
-def _wait_enter(prompt: str) -> None:
-    if _shutdown.is_set():
-        raise KeyboardInterrupt
-    with _stdin_lock:
-        print(f"\n>>> {_step_prefix()}{prompt}", flush=True)
-        try:
-            input()
-        except EOFError:
-            raise KeyboardInterrupt from None
-
-
-def _schedule_deferred(
-    scenario_id: str,
-    title: str,
-    label: str,
-    run: Callable[[], None],
-    *,
-    delay_sec: float,
-) -> None:
-    global _deferred_order
-    not_before = time.monotonic() + delay_sec
-    with _deferred_lock:
-        _deferred_order += 1
-        order = _deferred_order
-        _deferred_steps.append(
-            DeferredStep(
-                scenario_id=scenario_id,
-                title=title,
-                label=label,
-                run=run,
-                not_before=not_before,
-                order=order,
-            )
-        )
-    rel_min = (not_before - _program_start) / 60.0
-    log(
-        scenario_id,
-        title,
-        f"Deferred to Phase 2 (~{rel_min:.0f} min from start): {label}",
-    )
-
-
-def pause_ttl_deferred(
+def pause_ttl_then(
     scenario_id: str,
     title: str,
     label: str,
     delay_sec: float,
     continue_fn: Callable[[], None],
 ) -> None:
-    """Auto mode: sleep then continue. Step mode: run continue_fn later in Phase 2."""
-    if _step_mode:
-        _schedule_deferred(
-            scenario_id, title, label, continue_fn, delay_sec=delay_sec
-        )
-        return
     pause(scenario_id, title, delay_sec, label)
     continue_fn()
 
 
 def pause(scenario_id: str, title: str, seconds: float, label: str) -> None:
-    if _step_mode:
-        return
     log(scenario_id, title, f"... waiting {seconds:g}s — {label}")
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if _shutdown.is_set():
             raise KeyboardInterrupt
         time.sleep(min(0.5, deadline - time.monotonic()))
-
-
-def _step_before_message(kind: str, preview: str) -> None:
-    if not _step_mode:
-        return
-    snippet = preview.replace("\n", " ").strip()
-    if len(snippet) > 72:
-        snippet = snippet[:69] + "…"
-    _wait_enter(f"Press Enter to send {kind}: {snippet}")
 
 
 def wait_until(started_at: float, offset_sec: float) -> None:
@@ -277,7 +182,6 @@ def wait_until(started_at: float, offset_sec: float) -> None:
 
 
 def post_inbound(client: httpx.Client, phone: str, text: str) -> dict[str, Any]:
-    _step_before_message("inbound", text)
     res = _request_with_retry(
         lambda: client.post(
             f"{MIDDLEWARE_URL}/inbound",
@@ -303,7 +207,6 @@ def post_reply_raw(
     *,
     timestamp: datetime | None = None,
 ) -> httpx.Response:
-    _step_before_message("outbound", text)
     at = timestamp or utc_now()
     body = {"text": text, "timestamp": iso(at)}
     return _request_with_retry(
@@ -521,15 +424,9 @@ def run_scenario_1_happy_path() -> None:
                 )
             log(scenario_id, title, f"Complete — {phone}")
 
-        pause_ttl_deferred(
+        pause_ttl_then(
             scenario_id, title, "past session TTL", SESSION_EXPIRE_WAIT_SEC, after_ttl
         )
-        if _step_mode:
-            log(
-                scenario_id,
-                title,
-                "Phase 1 complete (post-expiry follow-up deferred to Phase 2)",
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -568,15 +465,13 @@ def run_scenario_2_expired_session() -> None:
             log(scenario_id, title, "Reply disabled in console for this caller")
             log(scenario_id, title, f"Complete — {phone}")
 
-        pause_ttl_deferred(
+        pause_ttl_then(
             scenario_id,
             title,
             "TTL elapsed",
             SESSION_EXPIRE_WAIT_SEC + 20,
             after_ttl,
         )
-        if _step_mode:
-            log(scenario_id, title, "Phase 1 complete (expiry check deferred to Phase 2)")
 
 
 # ---------------------------------------------------------------------------
@@ -878,15 +773,9 @@ def run_scenario_7_fire_smoke() -> None:
                 )
             log(scenario_id, title, f"Complete — {phone}")
 
-        pause_ttl_deferred(
+        pause_ttl_then(
             scenario_id, title, "past session TTL", SESSION_EXPIRE_WAIT_SEC, after_ttl
         )
-        if _step_mode:
-            log(
-                scenario_id,
-                title,
-                "Phase 1 complete (post-expiry follow-up deferred to Phase 2)",
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -1029,19 +918,13 @@ def run_scenario_10_expiring_soon() -> None:
                 patch_tags(ttl_client, sid, ["police"])
             log(scenario_id, title, f"Complete — {phone}")
 
-        pause_ttl_deferred(
+        pause_ttl_then(
             scenario_id,
             title,
             "approaching expiring-soon window",
             240,
             after_expiring_window,
         )
-        if _step_mode:
-            log(
-                scenario_id,
-                title,
-                "Phase 1 complete (expiring-soon follow-up deferred to Phase 2)",
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -1106,15 +989,9 @@ def run_scenario_11_session_rollover() -> None:
                 )
             log(scenario_id, title, f"Complete — {phone}")
 
-        pause_ttl_deferred(
+        pause_ttl_then(
             scenario_id, title, "past session TTL", SESSION_EXPIRE_WAIT_SEC, after_ttl
         )
-        if _step_mode:
-            log(
-                scenario_id,
-                title,
-                "Phase 1 complete (post-expiry rollover deferred to Phase 2)",
-            )
 
 
 def _stagger_offsets(count: int, window_sec: float) -> list[float]:
@@ -1144,87 +1021,7 @@ SCENARIO_SCHEDULE: list[ScheduledScenario] = [
 ]
 
 
-def _print_step_mode_schedule() -> None:
-    phase1_lo = STEP_MODE_MESSAGES_PHASE1 * STEP_MODE_SEC_PER_ENTER_EST / 60.0
-    phase1_hi = phase1_lo * 1.35
-    stagger_min = STAGGER_WINDOW_SEC / 60.0
-    ttl_min = SESSION_EXPIRE_WAIT_SEC / 60.0
-    print("Step mode presentation guide:")
-    print(
-        f"  Phase 1 (~{phase1_lo:.0f}–{phase1_hi:.0f} min): "
-        f"All 11 scenarios staggered over ~{stagger_min:.0f} min; "
-        f"Press Enter before each message (~{STEP_MODE_MESSAGES_PHASE1} sends)."
-    )
-    print(
-        f"  Phase 2 (~{ttl_min:.0f} min TTL waits, then Enter per message): "
-        "session expiry, expiring-soon, and post-expiry agent replies"
-    )
-    print("    • Scenario 1 — Citizen texts after TTL → agent on new session")
-    print("    • Scenario 2 — Reply rejected on expired session")
-    print("    • Scenario 7 — Citizen after TTL → agent on new session")
-    print("    • Scenario 10 — Citizen returns in expiring-soon window")
-    print("    • Scenario 11 — Thank you after TTL → agent you're welcome")
-    print(
-        f"  Tip: Phase 2 starts after Phase 1 threads finish; "
-        f"TTL timers run in the background (~{ttl_min:.0f} min from deferral).\n"
-    )
-
-
-def _wait_until_monotonic(deadline: float, scenario_id: str, title: str, label: str) -> None:
-    while True:
-        if _shutdown.is_set():
-            raise KeyboardInterrupt
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        if _step_mode and remaining > 5:
-            log(
-                scenario_id,
-                title,
-                f"... TTL wait {remaining:.0f}s remaining — {label}",
-            )
-            time.sleep(min(15.0, remaining))
-        else:
-            time.sleep(min(0.5, remaining))
-
-
-def run_deferred_phase() -> None:
-    with _deferred_lock:
-        steps = sorted(_deferred_steps, key=lambda s: (s.not_before, s.order))
-
-    if not steps:
-        return
-
-    print("\n" + "=" * 60)
-    print("PHASE 2 — Deferred steps (expiry / expiring-soon / rollover)")
-    print("=" * 60)
-    for step in steps:
-        rel = (step.not_before - _program_start) / 60.0
-        print(
-            f"  Scenario {step.scenario_id} — {step.title}: "
-            f"{step.label} (scheduled ~{rel:.0f} min from start)"
-        )
-    print()
-
-    for step in steps:
-        if _shutdown.is_set():
-            break
-        _step_ctx.scenario_id = step.scenario_id
-        _step_ctx.title = step.title
-        log(step.scenario_id, step.title, f"Phase 2 — {step.label}")
-        _wait_until_monotonic(step.not_before, step.scenario_id, step.title, step.label)
-        try:
-            step.run()
-        except KeyboardInterrupt:
-            raise
-        except Exception as exc:
-            print(f"[Scenario {step.scenario_id} — {step.title}] FAILED: {exc}")
-            traceback.print_exc()
-
-
 def _run_wrapped(scenario_id: str, title: str, fn: ScenarioFn) -> None:
-    _step_ctx.scenario_id = scenario_id
-    _step_ctx.title = title
     try:
         fn()
     except KeyboardInterrupt:
@@ -1236,9 +1033,7 @@ def _run_wrapped(scenario_id: str, title: str, fn: ScenarioFn) -> None:
 
 def run_staggered() -> None:
     """Start each scenario at a different time over the first five minutes."""
-    global _program_start
-    _program_start = time.monotonic()
-    program_start = _program_start
+    program_start = time.monotonic()
     threads: list[threading.Thread] = []
 
     for item in SCENARIO_SCHEDULE:
@@ -1275,21 +1070,8 @@ def run_staggered() -> None:
             thread.join(timeout=3)
         raise
 
-    run_deferred_phase()
-
 
 def main() -> None:
-    global _step_mode
-
-    parser = argparse.ArgumentParser(description="Northstar demo harness")
-    parser.add_argument(
-        "--step",
-        action="store_true",
-        help="Press Enter before each message; defer long TTL waits to Phase 2",
-    )
-    args = parser.parse_args()
-    _step_mode = args.step
-
     print("Northstar demo harness\n")
     err = check_services()
     if err:
@@ -1297,14 +1079,9 @@ def main() -> None:
         print("Start both with: python run.py")
         sys.exit(1)
 
-    if _step_mode:
-        print("Step mode: scenarios run in order (1 → 10).")
-        print("Press Enter before each inbound/outbound message.")
-        print("Long TTL waits still require Enter but do not sleep.\n")
-    else:
-        print("Scenarios (staggered over first 5 minutes):")
-        for item in SCENARIO_SCHEDULE:
-            print(f"  {item.start_offset_sec:5.0f}s — Scenario {item.id}: {item.title}")
+    print("Scenarios (staggered over first 5 minutes):")
+    for item in SCENARIO_SCHEDULE:
+        print(f"  {item.start_offset_sec:5.0f}s — Scenario {item.id}: {item.title}")
     print("\nPress Ctrl+C to stop.\n")
 
     try:

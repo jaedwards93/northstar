@@ -1,6 +1,7 @@
 """Session listing, detail, and lazy expiry."""
 
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime
 
 from middleware.app.config import get_settings
 from middleware.app.models import (
@@ -16,11 +17,38 @@ from middleware.app.models import (
     SessionSummary,
 )
 from middleware.app.store import InMemoryStore, get_store
-from shared.session_policy import as_utc, expires_at, is_expired
+from shared.session_policy import as_utc, expires_at, is_expired, utc_now
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+@dataclass(frozen=True)
+class _LastMessageFields:
+    preview: str | None
+    timestamp: datetime
+    direction: MessageDirection | None
+
+
+def _last_message_fields(session: Session) -> _LastMessageFields:
+    last = session.messages[-1] if session.messages else None
+    return _LastMessageFields(
+        preview=last.text if last else None,
+        timestamp=last.timestamp if last else session.last_activity_at,
+        direction=last.direction if last else None,
+    )
+
+
+def _is_reply_target(
+    session: Session,
+    store: InMemoryStore,
+    at: datetime,
+    ttl_seconds: int,
+) -> bool:
+    current = store.get_session_by_phone(session.phone)
+    return (
+        current is not None
+        and current.id == session.id
+        and session.status == SessionStatus.ACTIVE
+        and not is_session_expired(session, at, ttl_seconds)
+    )
 
 
 def is_session_expired(session: Session, at: datetime, ttl_seconds: int) -> bool:
@@ -36,7 +64,7 @@ def expire_if_needed(
     session: Session, store: InMemoryStore, at: datetime | None = None
 ) -> Session:
     """Mark session expired when past TTL; persist if changed."""
-    at = at or _utc_now()
+    at = at or utc_now()
     ttl = get_settings().session_ttl_seconds
     if is_session_expired(session, at, ttl) and session.status != SessionStatus.EXPIRED:
         session = session.model_copy(update={"status": SessionStatus.EXPIRED})
@@ -139,13 +167,13 @@ def _to_block(session: Session, ttl_seconds: int) -> SessionBlock:
 
 
 def _to_summary(session: Session) -> SessionSummary:
-    last = session.messages[-1] if session.messages else None
+    last = _last_message_fields(session)
     return SessionSummary(
         id=session.id,
         from_number=session.phone,
         status=session.status,
-        preview=last.text if last else None,
-        timestamp=last.timestamp if last else session.last_activity_at,
+        preview=last.preview,
+        timestamp=last.timestamp,
         last_activity_at=session.last_activity_at,
     )
 
@@ -177,7 +205,7 @@ def _to_detail(
 async def list_sessions_by_phone() -> list[PhoneSummary]:
     """One sidebar row per phone; points at the current conversation session."""
     store = get_store()
-    now = _utc_now()
+    now = utc_now()
     ttl = get_settings().session_ttl_seconds
 
     async with store.lock:
@@ -191,18 +219,18 @@ async def list_sessions_by_phone() -> list[PhoneSummary]:
             current = _pick_current_session_for_phone(store, phone, now, ttl)
             if current is None:
                 continue
-            last = current.messages[-1] if current.messages else None
+            last = _last_message_fields(current)
             inbound_at = last_inbound_at(current)
             summaries.append(
                 PhoneSummary(
                     from_number=phone,
                     current_session_id=current.id,
                     status=current.status,
-                    preview=last.text if last else None,
-                    timestamp=last.timestamp if last else current.last_activity_at,
+                    preview=last.preview,
+                    timestamp=last.timestamp,
                     last_inbound_at=inbound_at,
                     last_activity_at=current.last_activity_at,
-                    last_message_direction=last.direction if last else None,
+                    last_message_direction=last.direction,
                     agency_tags=list(current.agency_tags),
                 )
             )
@@ -213,7 +241,7 @@ async def list_sessions_by_phone() -> list[PhoneSummary]:
 async def list_sessions(*, include_expired: bool = False) -> list[SessionSummary]:
     """List sessions sorted by latest activity (newest first)."""
     store = get_store()
-    now = _utc_now()
+    now = utc_now()
 
     async with store.lock:
         summaries: list[SessionSummary] = []
@@ -230,7 +258,7 @@ async def get_session_detail(session_id: str) -> SessionDetail | None:
     """Session detail with older same-phone sessions for context."""
     store = get_store()
     settings = get_settings()
-    now = _utc_now()
+    now = utc_now()
     ttl = settings.session_ttl_seconds
 
     async with store.lock:
@@ -253,18 +281,10 @@ async def get_session_detail(session_id: str) -> SessionDetail | None:
         idx = next((i for i, s in enumerate(phone_sessions) if s.id == session_id), 0)
         previous = [_to_block(s, ttl) for s in phone_sessions[:idx]]
 
-        current = store.get_session_by_phone(session.phone)
-        is_reply_target = (
-            current is not None
-            and current.id == session.id
-            and session.status == SessionStatus.ACTIVE
-            and not is_session_expired(session, now, ttl)
-        )
-
         return _to_detail(
             session,
             previous_sessions=previous,
-            is_reply_target=is_reply_target,
+            is_reply_target=_is_reply_target(session, store, now, ttl),
         )
 
 
@@ -274,7 +294,7 @@ async def update_session_tags(
     """Set agency tags on a session (current reply target only)."""
     store = get_store()
     settings = get_settings()
-    now = _utc_now()
+    now = utc_now()
     ttl = settings.session_ttl_seconds
     unique = list(dict.fromkeys(tags))
 
@@ -284,14 +304,7 @@ async def update_session_tags(
             return None
 
         session = expire_if_needed(session, store, now)
-        current = store.get_session_by_phone(session.phone)
-        is_reply_target = (
-            current is not None
-            and current.id == session.id
-            and session.status == SessionStatus.ACTIVE
-            and not is_session_expired(session, now, ttl)
-        )
-        if not is_reply_target:
+        if not _is_reply_target(session, store, now, ttl):
             return None
 
         session = session.model_copy(update={"agency_tags": unique})
