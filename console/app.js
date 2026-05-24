@@ -3,10 +3,12 @@
  */
 
 const POLL_MS = 2000;
-const REPLY_TIMEOUT_MS = 20000;
+/** Must cover outbound retries (4 × 5s) + backoffs (3.5s). */
+const REPLY_TIMEOUT_MS = 35000;
 const state = {
   config: null,
-  statusFilter: "all",
+  /** empty = All; otherwise OR-match any selected UI status */
+  statusFilter: [],
   readFilter: "all",
   /** empty = All; otherwise OR-match any selected agency tag */
   agencyFilter: [],
@@ -16,6 +18,7 @@ const state = {
   replyText: "",
   replyStatus: "idle",
   globalError: null,
+  lastDeliveryError: null,
   pollTimer: null,
   countdownTimer: null,
   /** current_session_id -> latest inbound timestamp (ms) the agent has seen */
@@ -111,6 +114,63 @@ function formatAgencyDeployedList(tags) {
   return tags.map((t) => AGENCY_DISPLAY[t] || String(t).toUpperCase()).join(", ");
 }
 
+function formatDeliveryFailureMessage(message) {
+  const attempts = message.delivery_attempts ?? 0;
+  const err = message.delivery_error || "Unknown delivery error.";
+  return attempts
+    ? `Delivery failed after ${attempts} attempt(s). ${err} Message is in the conversation.`
+    : `Delivery failed. ${err} Message is in the conversation.`;
+}
+
+function getLatestOutboundMessage(messages) {
+  for (let i = (messages || []).length - 1; i >= 0; i--) {
+    if (messages[i].direction === "outbound") return messages[i];
+  }
+  return null;
+}
+
+/** Latest outbound delivery failure (API harness, UI, or poll). */
+function getOutboundDeliveryFailure(detail) {
+  if (!detail) return null;
+  if (detail.outbound_delivery_failure) return detail.outbound_delivery_failure;
+  const latest = getLatestOutboundMessage(detail.messages);
+  if (!latest || latest.delivery_status !== "failed") return null;
+  return formatDeliveryFailureMessage(latest);
+}
+
+function hasActiveOutboundDeliveryFailure(detail) {
+  return getOutboundDeliveryFailure(detail) != null;
+}
+
+function getLatestOutboundDeliveryStatus(detail) {
+  if (!detail) return null;
+  if (detail.latest_outbound_delivery_status) {
+    return detail.latest_outbound_delivery_status;
+  }
+  const latest = getLatestOutboundMessage(detail.messages);
+  return latest?.delivery_status ?? null;
+}
+
+function syncOutboundDeliveryFromDetail(detail) {
+  const status = getLatestOutboundDeliveryStatus(detail);
+  if (status === "failed") {
+    state.replyStatus = "failed";
+    state.lastDeliveryError = getOutboundDeliveryFailure(detail);
+    return;
+  }
+  if (status === "delivered") {
+    state.replyStatus = "delivered";
+    state.lastDeliveryError = null;
+    return;
+  }
+  if (state.replyStatus === "sending") return;
+  if (getLatestOutboundMessage(detail?.messages)) return;
+  if (state.replyStatus === "failed" || state.replyStatus === "delivered") {
+    state.replyStatus = "idle";
+    state.lastDeliveryError = null;
+  }
+}
+
 function latestInboundMs(detail) {
   let max = 0;
   for (const msg of detail.messages || []) {
@@ -120,15 +180,36 @@ function latestInboundMs(detail) {
   return max;
 }
 
+function agentHasLastMessage(messages) {
+  const msgs = messages || [];
+  return msgs.length > 0 && msgs[msgs.length - 1].direction === "outbound";
+}
+
+/** Mark read through latest inbound (or now if the thread ends on an agent message). */
 function markSessionRead(sessionId, detail) {
   if (!sessionId || !detail) return;
-  const seen = latestInboundMs(detail);
-  if (seen > 0) {
-    state.readUpTo[sessionId] = Math.max(state.readUpTo[sessionId] || 0, seen);
+  const inboundMs = latestInboundMs(detail);
+  if (agentHasLastMessage(detail.messages)) {
+    state.readUpTo[sessionId] = Math.max(
+      state.readUpTo[sessionId] || 0,
+      inboundMs > 0 ? inboundMs : Date.now()
+    );
+    return;
+  }
+  if (inboundMs > 0) {
+    state.readUpTo[sessionId] = Math.max(state.readUpTo[sessionId] || 0, inboundMs);
   }
 }
 
+function syncReadForAgentLastMessage(row) {
+  if (row.last_message_direction !== "outbound") return;
+  const sessionId = row.current_session_id;
+  const inboundMs = row.last_inbound_at ? asUtcMs(row.last_inbound_at) : Date.now();
+  state.readUpTo[sessionId] = Math.max(state.readUpTo[sessionId] || 0, inboundMs);
+}
+
 function isPhoneUnread(row) {
+  if (row.last_message_direction === "outbound") return false;
   if (!row.last_inbound_at) return false;
   const inboundMs = asUtcMs(row.last_inbound_at);
   const isOpen =
@@ -142,7 +223,7 @@ function isPhoneUnread(row) {
 function filteredSessions() {
   return state.sessions.filter((s) => {
     const ui = uiStatus(s);
-    if (state.statusFilter !== "all" && ui !== state.statusFilter) {
+    if (state.statusFilter.length > 0 && !state.statusFilter.includes(ui)) {
       return false;
     }
     const unread = isPhoneUnread(s);
@@ -231,6 +312,9 @@ async function pollSessions() {
   }
   state.globalError = null;
   state.sessions = body;
+  for (const row of body) {
+    syncReadForAgentLastMessage(row);
+  }
 
   if (state.selectedSessionId && state.detail) {
     const row = body.find((p) => p.from === state.detail.from);
@@ -260,6 +344,9 @@ async function pollDetail() {
   const idx = state.sessions.findIndex((p) => p.from === body.from);
   if (idx >= 0) {
     const inboundMs = latestInboundMs(body);
+    const lastMsg = body.messages?.length
+      ? body.messages[body.messages.length - 1]
+      : null;
     state.sessions[idx] = {
       ...state.sessions[idx],
       current_session_id: body.id,
@@ -268,9 +355,12 @@ async function pollDetail() {
       agency_tags: body.agency_tags,
       last_inbound_at:
         inboundMs > 0 ? new Date(inboundMs).toISOString() : state.sessions[idx].last_inbound_at,
+      last_message_direction: lastMsg?.direction ?? state.sessions[idx].last_message_direction,
     };
+    syncReadForAgentLastMessage(state.sessions[idx]);
   }
   syncAgencyCheckboxes(body.agency_tags);
+  syncOutboundDeliveryFromDetail(body);
 }
 
 async function poll() {
@@ -314,16 +404,31 @@ async function sendReply() {
   if (!text || !state.selectedSessionId || isReplyDisabled()) return;
 
   state.replyStatus = "sending";
+  state.lastDeliveryError = null;
   render();
 
-  const { ok, status, body } = await fetchJson(
-    `/sessions/${state.selectedSessionId}/reply`,
-    {
-      method: "POST",
-      body: JSON.stringify({ text }),
-      timeoutMs: REPLY_TIMEOUT_MS,
-    }
-  );
+  let ok;
+  let status;
+  let body;
+  try {
+    ({ ok, status, body } = await fetchJson(
+      `/sessions/${state.selectedSessionId}/reply`,
+      {
+        method: "POST",
+        body: JSON.stringify({ text, timestamp: new Date().toISOString() }),
+        timeoutMs: REPLY_TIMEOUT_MS,
+      }
+    ));
+  } catch (err) {
+    state.replyStatus = "failed";
+    state.lastDeliveryError =
+      err.name === "AbortError"
+        ? "Reply timed out while delivery was retrying. Check the conversation for the message status."
+        : err.message || "Connection error while sending reply.";
+    await pollDetail();
+    render();
+    return;
+  }
 
   if (status === 409) {
     state.replyStatus = "failed";
@@ -341,7 +446,7 @@ async function sendReply() {
     return;
   }
 
-  if (body.success) {
+  if (body.success || body.duplicate) {
     state.replyStatus = "delivered";
     state.lastDeliveryError = null;
     $("reply-input").value = "";
@@ -353,9 +458,10 @@ async function sendReply() {
   state.replyStatus = "failed";
   const attempts = body.delivery_attempts ?? 0;
   const err = body.error || "Unknown delivery error.";
-  state.lastDeliveryError = attempts
-    ? `Delivery failed after ${attempts} attempt(s). ${err} Message is in the conversation.`
-    : `Delivery failed. ${err} Message is in the conversation.`;
+  state.lastDeliveryError = formatDeliveryFailureMessage({
+    delivery_attempts: attempts,
+    delivery_error: err,
+  });
   await pollDetail();
   render();
 }
@@ -406,10 +512,18 @@ function renderMessageList(container, messages, historical) {
     const div = document.createElement("div");
     const role = msg.direction === "inbound" ? "user" : "agent";
     const label = msg.direction === "inbound" ? "User" : "Agent";
-    div.className = `msg ${role}${historical ? " msg-historical" : ""}`;
+    const failed =
+      msg.direction === "outbound" && msg.delivery_status === "failed";
+    div.className = `msg ${role}${historical ? " msg-historical" : ""}${
+      failed ? " msg-delivery-failed" : ""
+    }`;
+    const failedNote = failed
+      ? `<div class="msg-delivery-note">Not delivered to caller</div>`
+      : "";
     div.innerHTML = `
       <div class="msg-meta">${label} · ${escapeHtml(formatTime(msg.timestamp))}</div>
       <div>${escapeHtml(msg.text)}</div>
+      ${failedNote}
     `;
     container.appendChild(div);
   }
@@ -451,8 +565,11 @@ function renderMessages() {
     );
   }
 
-  if (state.lastDeliveryError && state.replyStatus === "failed") {
-    appendSystemMessage(currentBlock, state.lastDeliveryError);
+  const deliveryBanner =
+    getOutboundDeliveryFailure(d) ||
+    (state.replyStatus === "failed" ? state.lastDeliveryError : null);
+  if (deliveryBanner) {
+    appendSystemMessage(currentBlock, deliveryBanner);
   }
 
   renderMessageList(currentBlock, d.messages, false);
@@ -565,82 +682,147 @@ function renderConversation() {
   const feedback = $("reply-feedback");
   feedback.className = "reply-feedback";
   feedback.textContent = "";
+  const outboundStatus = getLatestOutboundDeliveryStatus(d);
+  const deliveryFailed =
+    outboundStatus === "failed" ||
+    (state.replyStatus === "failed" && outboundStatus !== "delivered");
+  const deliverySucceeded =
+    outboundStatus === "delivered" || state.replyStatus === "delivered";
   if (state.replyStatus === "sending") {
     feedback.textContent = "Sending…";
     feedback.classList.add("sending");
-  } else if (state.replyStatus === "delivered") {
+  } else if (deliveryFailed) {
+    feedback.textContent = "FAILED";
+    feedback.classList.add("failed");
+  } else if (deliverySucceeded) {
     feedback.textContent = "Delivered";
     feedback.classList.add("delivered");
-  } else if (state.replyStatus === "failed") {
-    feedback.textContent = "Delivery failed";
-    feedback.classList.add("failed");
   }
 }
 
-function agencyFilterLabel() {
-  if (state.agencyFilter.length === 0) return "All";
-  const names = { fire: "Fire", medical: "Medical", police: "Police" };
-  return state.agencyFilter.map((t) => names[t] || t).join(", ");
+const STATUS_MULTI_FILTER = {
+  detailsId: "status-filter",
+  labelId: "status-filter-label",
+  dataAttr: "status-filter",
+  optionLabels: {
+    active: "Active",
+    expiring: "Expiring Soon",
+    expired: "Expired",
+  },
+  getSelected: () => state.statusFilter,
+  setSelected: (values) => {
+    state.statusFilter = values;
+  },
+};
+
+const AGENCY_MULTI_FILTER = {
+  detailsId: "agency-filter",
+  labelId: "agency-filter-label",
+  dataAttr: "agency-filter",
+  optionLabels: { fire: "Fire", medical: "Medical", police: "Police" },
+  getSelected: () => state.agencyFilter,
+  setSelected: (values) => {
+    state.agencyFilter = values;
+  },
+};
+
+function filterDatasetRole(el, dataAttrKebab) {
+  const key = dataAttrKebab.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+  return el.dataset[key];
 }
 
-function syncAgencyFilterUi() {
-  const allCb = document.querySelector('input[data-agency-filter="all"]');
-  const tagCbs = document.querySelectorAll('input[data-agency-filter="tag"]');
-  const isAll = state.agencyFilter.length === 0;
+function multiFilterInputs(config) {
+  const root = $(config.detailsId);
+  if (!root) return { root, allCb: null, tagCbs: [] };
+  return {
+    root,
+    allCb: root.querySelector(`input[data-${config.dataAttr}="all"]`),
+    tagCbs: Array.from(
+      root.querySelectorAll(`input[data-${config.dataAttr}="tag"]`)
+    ),
+  };
+}
+
+function multiFilterLabel(selected, optionLabels) {
+  if (selected.length === 0) return "All";
+  return selected.map((t) => optionLabels[t] || t).join(", ");
+}
+
+function syncMultiFilterUi(config) {
+  const { allCb, tagCbs } = multiFilterInputs(config);
+  const selected = config.getSelected();
+  const isAll = selected.length === 0;
 
   if (allCb) allCb.checked = isAll;
   tagCbs.forEach((el) => {
-    el.checked = !isAll && state.agencyFilter.includes(el.value);
+    el.checked = !isAll && selected.includes(el.value);
   });
-  $("agency-filter-label").textContent = agencyFilterLabel();
+  const labelEl = $(config.labelId);
+  if (labelEl) {
+    labelEl.textContent = multiFilterLabel(selected, config.optionLabels);
+  }
 }
 
-function closeAgencyFilter() {
-  const details = $("agency-filter");
+function closeMultiFilter(config) {
+  const details = $(config.detailsId);
   if (details) details.open = false;
 }
 
-function onAgencyFilterChange(changed) {
-  const allCb = document.querySelector('input[data-agency-filter="all"]');
-  const tagCbs = document.querySelectorAll('input[data-agency-filter="tag"]');
+function onMultiFilterChange(changed, config) {
+  const { allCb, tagCbs } = multiFilterInputs(config);
+  const role = filterDatasetRole(changed, config.dataAttr);
 
-  if (changed.dataset.agencyFilter === "all") {
-    state.agencyFilter = [];
-    syncAgencyFilterUi();
+  if (role === "all") {
+    config.setSelected([]);
+    syncMultiFilterUi(config);
     render();
     return;
   }
 
-  if (changed.checked && allCb) allCb.checked = false;
+  if (role === "tag") {
+    const checkedTags = tagCbs.filter((el) => el.checked).map((el) => el.value);
 
-  state.agencyFilter = Array.from(tagCbs)
-    .filter((el) => el.checked)
-    .map((el) => el.value);
+    if (checkedTags.length === 0 || checkedTags.length === tagCbs.length) {
+      config.setSelected([]);
+    } else {
+      if (allCb) allCb.checked = false;
+      config.setSelected(checkedTags);
+    }
 
-  if (state.agencyFilter.length === 0 && allCb) {
-    allCb.checked = true;
-  } else if (allCb) {
-    allCb.checked = false;
+    syncMultiFilterUi(config);
+    render();
   }
-  $("agency-filter-label").textContent = agencyFilterLabel();
-  render();
+}
+
+function closeFilterDropdowns() {
+  closeMultiFilter(STATUS_MULTI_FILTER);
+  closeMultiFilter(AGENCY_MULTI_FILTER);
+}
+
+function syncStatusFilterUi() {
+  syncMultiFilterUi(STATUS_MULTI_FILTER);
+}
+
+function syncAgencyFilterUi() {
+  syncMultiFilterUi(AGENCY_MULTI_FILTER);
 }
 
 function render() {
-  $("filter-status").value = state.statusFilter;
   $("filter-read").value = state.readFilter;
+  syncStatusFilterUi();
   syncAgencyFilterUi();
   renderSessionList();
   renderConversation();
 }
 
 function selectSession(id) {
-  closeAgencyFilter();
+  closeFilterDropdowns();
   state.selectedSessionId = id;
   state.replyStatus = "idle";
   state.lastDeliveryError = null;
   state.globalError = null;
   pollDetail().then(() => {
+    syncOutboundDeliveryFromDetail(state.detail);
     render();
     $("messages").scrollTop = $("messages").scrollHeight;
   });
@@ -655,27 +837,33 @@ function escapeHtml(str) {
 }
 
 function bindEvents() {
-  $("filter-status").addEventListener("change", (e) => {
-    closeAgencyFilter();
-    state.statusFilter = e.target.value;
-    render();
-  });
   $("filter-read").addEventListener("change", (e) => {
-    closeAgencyFilter();
+    closeFilterDropdowns();
     state.readFilter = e.target.value;
     render();
   });
   document
+    .querySelectorAll("#status-filter input[type=checkbox]")
+    .forEach((el) => {
+      el.addEventListener("change", () =>
+        onMultiFilterChange(el, STATUS_MULTI_FILTER)
+      );
+    });
+  document
     .querySelectorAll("#agency-filter input[type=checkbox]")
     .forEach((el) => {
-      el.addEventListener("change", () => onAgencyFilterChange(el));
+      el.addEventListener("change", () =>
+        onMultiFilterChange(el, AGENCY_MULTI_FILTER)
+      );
     });
 
   document.addEventListener("click", (e) => {
-    const details = $("agency-filter");
-    if (!details?.open) return;
-    if (details.contains(e.target)) return;
-    closeAgencyFilter();
+    const openDetails = [STATUS_MULTI_FILTER, AGENCY_MULTI_FILTER]
+      .map((c) => $(c.detailsId))
+      .filter((d) => d?.open);
+    if (openDetails.length === 0) return;
+    if (openDetails.some((d) => d.contains(e.target))) return;
+    closeFilterDropdowns();
   });
 
   document.querySelectorAll('input[name="agency-tag"]').forEach((el) => {
@@ -686,7 +874,19 @@ function bindEvents() {
   $("reply-input").addEventListener("input", () => {
     $("send-btn").disabled =
       isReplyDisabled() || !$("reply-input").value.trim();
-    if (state.replyStatus !== "sending") state.replyStatus = "idle";
+    if (state.replyStatus === "sending") return;
+    const status = getLatestOutboundDeliveryStatus(state.detail);
+    if (status === "failed") {
+      state.replyStatus = "failed";
+      return;
+    }
+    if (status === "delivered") {
+      state.replyStatus = "delivered";
+      state.lastDeliveryError = null;
+      return;
+    }
+    state.replyStatus = "idle";
+    state.lastDeliveryError = null;
   });
   $("reply-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {

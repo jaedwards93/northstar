@@ -92,7 +92,7 @@ async def patch_session_tags(
 )
 async def reply(session_id: str, payload: AgentReplyRequest) -> AgentReplyResponse:
     try:
-        return await send_reply(session_id, payload.text)
+        return await send_reply(session_id, payload.text, payload.timestamp)
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found") from None
     except SessionExpiredError:

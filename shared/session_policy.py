@@ -3,6 +3,10 @@
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 
+# Demo / POC defaults (middleware Settings and harness use these).
+SESSION_TTL_SECONDS = 300  # 5 minutes
+SESSION_EXPIRING_SOON_SECONDS = 120  # "Expiring Soon" when less than this remains
+
 
 class UiSessionStatus(StrEnum):
     ACTIVE = "active"
