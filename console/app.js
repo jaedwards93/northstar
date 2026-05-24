@@ -2,6 +2,19 @@
  * Agent console — polls middleware /sessions and /config.
  */
 
+import {
+  applyDeliveryStateFromDetail,
+  asUtcMs,
+  escapeHtml,
+  expiresAtMs,
+  formatDeliveryFailureMessage,
+  getLatestOutboundDeliveryStatus,
+  getOutboundDeliveryFailure,
+  isPhoneUnread,
+  parseErrorDetail,
+  uiStatus,
+} from "./session-ui.js";
+
 const POLL_MS = 2000;
 /** Must cover outbound retries (4 × 5s) + backoffs (3.5s). */
 const REPLY_TIMEOUT_MS = 35000;
@@ -15,7 +28,6 @@ const state = {
   selectedSessionId: null,
   sessions: [],
   detail: null,
-  replyText: "",
   replyStatus: "idle",
   globalError: null,
   lastDeliveryError: null,
@@ -49,37 +61,25 @@ async function fetchJson(path, options = {}) {
   }
 }
 
-function parseErrorDetail(body) {
-  if (!body) return null;
-  const d = body.detail;
-  if (typeof d === "string") return d;
-  if (d && typeof d === "object") return d.message || d.code || JSON.stringify(d);
-  return null;
+function sessionUiStatus(session) {
+  return uiStatus(session, state.config);
 }
 
-function asUtcMs(iso) {
-  return new Date(iso).getTime();
+function sessionExpiresAtMs(lastActivityAt) {
+  return expiresAtMs(lastActivityAt, state.config);
 }
 
-function expiresAtMs(lastActivityAt) {
-  const ttl = state.config.session_ttl_seconds * 1000;
-  return asUtcMs(lastActivityAt) + ttl;
+function syncOutboundDeliveryFromDetail(detail) {
+  const next = applyDeliveryStateFromDetail(detail, {
+    replyStatus: state.replyStatus,
+    lastDeliveryError: state.lastDeliveryError,
+  });
+  state.replyStatus = next.replyStatus;
+  state.lastDeliveryError = next.lastDeliveryError;
 }
 
-function uiStatus(session) {
-  const cfg = state.config;
-  const now = Date.now();
-  const lastAt = session.last_activity_at || session.lastActivityAt;
-  if (!lastAt) return "active";
-
-  if (session.status === "expired") return "expired";
-
-  const expires = expiresAtMs(lastAt);
-  if (now >= expires) return "expired";
-
-  const remainingSec = (expires - now) / 1000;
-  if (remainingSec < cfg.session_expiring_soon_seconds) return "expiring";
-  return "active";
+function setBannerVisible(el, visible) {
+  if (el) el.hidden = !visible;
 }
 
 function formatTime(iso) {
@@ -93,7 +93,7 @@ function formatTime(iso) {
 }
 
 function formatCountdown(lastActivityAt) {
-  const remainingMs = expiresAtMs(lastActivityAt) - Date.now();
+  const remainingMs = sessionExpiresAtMs(lastActivityAt) - Date.now();
   if (remainingMs <= 0) return null;
   const totalSec = Math.ceil(remainingMs / 1000);
   const min = Math.floor(totalSec / 60);
@@ -112,63 +112,6 @@ const AGENCY_DISPLAY = { fire: "FIRE", medical: "MED", police: "POL" };
 function formatAgencyDeployedList(tags) {
   if (!tags || tags.length === 0) return "";
   return tags.map((t) => AGENCY_DISPLAY[t] || String(t).toUpperCase()).join(", ");
-}
-
-function formatDeliveryFailureMessage(message) {
-  const attempts = message.delivery_attempts ?? 0;
-  const err = message.delivery_error || "Unknown delivery error.";
-  return attempts
-    ? `Delivery failed after ${attempts} attempt(s). ${err} Message is in the conversation.`
-    : `Delivery failed. ${err} Message is in the conversation.`;
-}
-
-function getLatestOutboundMessage(messages) {
-  for (let i = (messages || []).length - 1; i >= 0; i--) {
-    if (messages[i].direction === "outbound") return messages[i];
-  }
-  return null;
-}
-
-/** Latest outbound delivery failure (API harness, UI, or poll). */
-function getOutboundDeliveryFailure(detail) {
-  if (!detail) return null;
-  if (detail.outbound_delivery_failure) return detail.outbound_delivery_failure;
-  const latest = getLatestOutboundMessage(detail.messages);
-  if (!latest || latest.delivery_status !== "failed") return null;
-  return formatDeliveryFailureMessage(latest);
-}
-
-function hasActiveOutboundDeliveryFailure(detail) {
-  return getOutboundDeliveryFailure(detail) != null;
-}
-
-function getLatestOutboundDeliveryStatus(detail) {
-  if (!detail) return null;
-  if (detail.latest_outbound_delivery_status) {
-    return detail.latest_outbound_delivery_status;
-  }
-  const latest = getLatestOutboundMessage(detail.messages);
-  return latest?.delivery_status ?? null;
-}
-
-function syncOutboundDeliveryFromDetail(detail) {
-  const status = getLatestOutboundDeliveryStatus(detail);
-  if (status === "failed") {
-    state.replyStatus = "failed";
-    state.lastDeliveryError = getOutboundDeliveryFailure(detail);
-    return;
-  }
-  if (status === "delivered") {
-    state.replyStatus = "delivered";
-    state.lastDeliveryError = null;
-    return;
-  }
-  if (state.replyStatus === "sending") return;
-  if (getLatestOutboundMessage(detail?.messages)) return;
-  if (state.replyStatus === "failed" || state.replyStatus === "delivered") {
-    state.replyStatus = "idle";
-    state.lastDeliveryError = null;
-  }
 }
 
 function latestInboundMs(detail) {
@@ -208,25 +151,21 @@ function syncReadForAgentLastMessage(row) {
   state.readUpTo[sessionId] = Math.max(state.readUpTo[sessionId] || 0, inboundMs);
 }
 
-function isPhoneUnread(row) {
-  if (row.last_message_direction === "outbound") return false;
-  if (!row.last_inbound_at) return false;
-  const inboundMs = asUtcMs(row.last_inbound_at);
-  const isOpen =
-    state.selectedSessionId === row.current_session_id &&
-    state.detail &&
-    state.detail.id === row.current_session_id;
-  if (isOpen) return false;
-  return inboundMs > (state.readUpTo[row.current_session_id] || 0);
+function phoneUnreadContext() {
+  return {
+    selectedSessionId: state.selectedSessionId,
+    detail: state.detail,
+    readUpTo: state.readUpTo,
+  };
 }
 
 function filteredSessions() {
   return state.sessions.filter((s) => {
-    const ui = uiStatus(s);
+    const ui = sessionUiStatus(s);
     if (state.statusFilter.length > 0 && !state.statusFilter.includes(ui)) {
       return false;
     }
-    const unread = isPhoneUnread(s);
+    const unread = isPhoneUnread(s, phoneUnreadContext());
     if (state.readFilter === "unread" && !unread) return false;
     if (state.readFilter === "read" && unread) return false;
     if (state.agencyFilter.length > 0) {
@@ -285,17 +224,10 @@ async function saveSessionTags() {
   }
 }
 
-function selectedPhoneRow() {
-  return (
-    state.sessions.find((p) => p.current_session_id === state.selectedSessionId) ||
-    null
-  );
-}
-
 function isReplyDisabled() {
   if (!state.detail || state.replyStatus === "sending") return true;
   if (state.detail.is_reply_target === false) return true;
-  return uiStatus(state.detail) === "expired";
+  return sessionUiStatus(state.detail) === "expired";
 }
 
 async function loadConfig() {
@@ -387,10 +319,10 @@ function startCountdown() {
     if (!state.detail || document.hidden) return;
     const expiryEl = $("session-expiry");
     if (!expiryEl) return;
-    const ui = uiStatus(state.detail);
+    const ui = sessionUiStatus(state.detail);
     if (ui === "expired") {
       expiryEl.textContent = `Expired ${formatTime(
-        new Date(expiresAtMs(state.detail.last_activity_at)).toISOString()
+        new Date(sessionExpiresAtMs(state.detail.last_activity_at)).toISOString()
       )}`;
       return;
     }
@@ -480,8 +412,8 @@ function renderSessionList() {
   }
 
   for (const row of items) {
-    const ui = uiStatus(row);
-    const unread = isPhoneUnread(row);
+    const ui = sessionUiStatus(row);
+    const unread = isPhoneUnread(row, phoneUnreadContext());
     const li = document.createElement("li");
     li.className = "session-item";
     if (row.current_session_id === state.selectedSessionId) {
@@ -529,8 +461,38 @@ function renderMessageList(container, messages, historical) {
   }
 }
 
+/** If within this distance of the bottom, poll re-renders keep the view pinned there. */
+const MESSAGE_SCROLL_PIN_PX = 48;
+
+function getMessagesScrollAnchor(container) {
+  const maxScroll = container.scrollHeight - container.clientHeight;
+  if (maxScroll <= 0) {
+    return { stick: true, ratio: 0 };
+  }
+  const distanceFromBottom = maxScroll - container.scrollTop;
+  return {
+    stick: distanceFromBottom <= MESSAGE_SCROLL_PIN_PX,
+    ratio: container.scrollTop / maxScroll,
+  };
+}
+
+function applyMessagesScroll(container, anchor) {
+  if (anchor.stick) {
+    container.scrollTop = container.scrollHeight;
+    return;
+  }
+  const maxScroll = container.scrollHeight - container.clientHeight;
+  if (maxScroll > 0) {
+    container.scrollTop = anchor.ratio * maxScroll;
+  }
+}
+
 function renderMessages() {
   const container = $("messages");
+  const anchor =
+    container.childElementCount > 0
+      ? getMessagesScrollAnchor(container)
+      : { stick: true, ratio: 0 };
   container.innerHTML = "";
 
   if (!state.detail) return;
@@ -555,12 +517,12 @@ function renderMessages() {
     appendSystemMessage(currentBlock, label);
   }
 
-  const ui = uiStatus(d);
+  const ui = sessionUiStatus(d);
   if (ui === "expired") {
     appendSystemMessage(
       currentBlock,
       `Session expired at ${formatTime(
-        new Date(expiresAtMs(d.last_activity_at)).toISOString()
+        new Date(sessionExpiresAtMs(d.last_activity_at)).toISOString()
       )}`
     );
   }
@@ -575,7 +537,7 @@ function renderMessages() {
   renderMessageList(currentBlock, d.messages, false);
   container.appendChild(currentBlock);
 
-  container.scrollTop = container.scrollHeight;
+  applyMessagesScroll(container, anchor);
 }
 
 function appendSystemMessage(container, text) {
@@ -610,15 +572,10 @@ function renderConversation() {
     badge.textContent = "";
     badge.className = "status-badge";
     expiryEl.textContent = "";
-    $("expired-banner").hidden = true;
-    $("expired-banner").classList.add("hidden");
-    $("global-error").hidden = !state.globalError;
-    if (state.globalError) {
-      $("global-error").classList.remove("hidden");
-      $("global-error").textContent = state.globalError;
-    } else {
-      $("global-error").classList.add("hidden");
-    }
+    setBannerVisible($("expired-banner"), false);
+    const globalErr = $("global-error");
+    setBannerVisible(globalErr, Boolean(state.globalError));
+    if (state.globalError) globalErr.textContent = state.globalError;
     $("messages").innerHTML = "";
     $("reply-input").disabled = true;
     $("send-btn").disabled = true;
@@ -628,12 +585,12 @@ function renderConversation() {
     return;
   }
 
-  const ui = uiStatus(d);
+  const ui = sessionUiStatus(d);
   badge.textContent = statusLabel(ui);
   badge.className = `status-badge ${ui}`;
 
   if (ui === "expired") {
-    const expiredAt = new Date(expiresAtMs(d.last_activity_at)).toISOString();
+    const expiredAt = new Date(sessionExpiresAtMs(d.last_activity_at)).toISOString();
     expiryEl.textContent = `Expired ${formatTime(expiredAt)}`;
   } else {
     const cd = formatCountdown(d.last_activity_at);
@@ -642,32 +599,23 @@ function renderConversation() {
 
   const expiredBanner = $("expired-banner");
   if (!d.is_reply_target) {
-    expiredBanner.hidden = false;
-    expiredBanner.classList.remove("hidden");
+    setBannerVisible(expiredBanner, true);
     expiredBanner.textContent =
       ui === "expired"
         ? `This session has expired. Reply is disabled.`
         : `This is not the current session for this number. Reply is disabled.`;
   } else if (ui === "expired") {
-    expiredBanner.hidden = false;
-    expiredBanner.classList.remove("hidden");
+    setBannerVisible(expiredBanner, true);
     expiredBanner.textContent = `Session expired at ${formatTime(
-      new Date(expiresAtMs(d.last_activity_at)).toISOString()
+      new Date(sessionExpiresAtMs(d.last_activity_at)).toISOString()
     )}. Reply is disabled.`;
   } else {
-    expiredBanner.hidden = true;
-    expiredBanner.classList.add("hidden");
+    setBannerVisible(expiredBanner, false);
   }
 
   const globalErr = $("global-error");
-  if (state.globalError) {
-    globalErr.hidden = false;
-    globalErr.classList.remove("hidden");
-    globalErr.textContent = state.globalError;
-  } else {
-    globalErr.hidden = true;
-    globalErr.classList.add("hidden");
-  }
+  setBannerVisible(globalErr, Boolean(state.globalError));
+  if (state.globalError) globalErr.textContent = state.globalError;
 
   renderMessages();
 
@@ -799,18 +747,10 @@ function closeFilterDropdowns() {
   closeMultiFilter(AGENCY_MULTI_FILTER);
 }
 
-function syncStatusFilterUi() {
-  syncMultiFilterUi(STATUS_MULTI_FILTER);
-}
-
-function syncAgencyFilterUi() {
-  syncMultiFilterUi(AGENCY_MULTI_FILTER);
-}
-
 function render() {
   $("filter-read").value = state.readFilter;
-  syncStatusFilterUi();
-  syncAgencyFilterUi();
+  syncMultiFilterUi(STATUS_MULTI_FILTER);
+  syncMultiFilterUi(AGENCY_MULTI_FILTER);
   renderSessionList();
   renderConversation();
 }
@@ -826,14 +766,6 @@ function selectSession(id) {
     render();
     $("messages").scrollTop = $("messages").scrollHeight;
   });
-}
-
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
 
 function bindEvents() {
@@ -875,18 +807,7 @@ function bindEvents() {
     $("send-btn").disabled =
       isReplyDisabled() || !$("reply-input").value.trim();
     if (state.replyStatus === "sending") return;
-    const status = getLatestOutboundDeliveryStatus(state.detail);
-    if (status === "failed") {
-      state.replyStatus = "failed";
-      return;
-    }
-    if (status === "delivered") {
-      state.replyStatus = "delivered";
-      state.lastDeliveryError = null;
-      return;
-    }
-    state.replyStatus = "idle";
-    state.lastDeliveryError = null;
+    syncOutboundDeliveryFromDetail(state.detail);
   });
   $("reply-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
