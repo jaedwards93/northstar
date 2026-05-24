@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from middleware.app.config import get_settings
 from middleware.app.models import (
     AgencyTag,
+    DeliveryStatus,
+    Message,
     MessageDirection,
     PhoneSummary,
     Session,
@@ -99,6 +101,32 @@ def _pick_current_session_for_phone(
     return max(sessions, key=lambda s: s.last_activity_at)
 
 
+def _latest_outbound_delivery_status(messages: list[Message]) -> DeliveryStatus | None:
+    for msg in reversed(messages):
+        if msg.direction == MessageDirection.OUTBOUND:
+            return msg.delivery_status
+    return None
+
+
+def _outbound_delivery_failure_message(messages: list[Message]) -> str | None:
+    """Human-readable failure for the latest outbound when delivery did not succeed."""
+    latest_outbound: Message | None = None
+    for msg in reversed(messages):
+        if msg.direction == MessageDirection.OUTBOUND:
+            latest_outbound = msg
+            break
+    if latest_outbound is None or latest_outbound.delivery_status != DeliveryStatus.FAILED:
+        return None
+    attempts = latest_outbound.delivery_attempts or 0
+    err = latest_outbound.delivery_error or "Unknown delivery error."
+    if attempts:
+        return (
+            f"Delivery failed after {attempts} attempt(s). {err} "
+            "Message is in the conversation."
+        )
+    return f"Delivery failed. {err} Message is in the conversation."
+
+
 def _to_block(session: Session, ttl_seconds: int) -> SessionBlock:
     return SessionBlock(
         id=session.id,
@@ -137,6 +165,12 @@ def _to_detail(
         previous_sessions=previous_sessions,
         is_reply_target=is_reply_target,
         agency_tags=list(session.agency_tags),
+        outbound_delivery_failure=_outbound_delivery_failure_message(
+            session.messages
+        ),
+        latest_outbound_delivery_status=_latest_outbound_delivery_status(
+            session.messages
+        ),
     )
 
 
@@ -168,6 +202,7 @@ async def list_sessions_by_phone() -> list[PhoneSummary]:
                     timestamp=last.timestamp if last else current.last_activity_at,
                     last_inbound_at=inbound_at,
                     last_activity_at=current.last_activity_at,
+                    last_message_direction=last.direction if last else None,
                     agency_tags=list(current.agency_tags),
                 )
             )

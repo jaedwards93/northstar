@@ -90,11 +90,15 @@ def test_expire_old_session_does_not_replace_phone_pointer():
         last_activity_at=now,
         messages=[],
     )
-    store.put_session(old)
+    # put_session only updates the phone pointer when it is empty or same id.
+    # Put the current (newer) session first, then the older one, so the pointer
+    # stays on new-session before we expire old.
     store.put_session(current)
+    store.put_session(old)
 
     from middleware.app.services.sessions import expire_if_needed
 
-    expire_if_needed(old, store, now)
+    expired = expire_if_needed(old, store, now)
 
+    assert expired.status == SessionStatus.EXPIRED
     assert store.get_session_by_phone("+15550002222").id == "new-session"

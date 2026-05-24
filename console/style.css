@@ -431,6 +431,18 @@ body {
   border: 1px solid rgba(41, 171, 226, 0.35);
 }
 
+.msg.agent.msg-delivery-failed {
+  background: rgba(198, 40, 40, 0.12);
+  border-color: rgba(198, 40, 40, 0.45);
+}
+
+.msg-delivery-note {
+  margin-top: 0.35rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--rsos-red);
+}
+
 .msg.system {
   align-self: center;
   max-width: 100%;

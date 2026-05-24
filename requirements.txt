@@ -1,5 +1,11 @@
-# Runtime — middleware + mock Northstar
+# Northstar POC — Python 3.10+
+
+# Runtime (middleware + mock_northstar)
 fastapi==0.136.1
 uvicorn[standard]==0.47.0
 httpx==0.28.1
+pydantic==2.13.4
 pydantic-settings==2.14.1
+
+# Tests
+pytest==9.0.3

@@ -16,15 +16,32 @@
         </header>
 
         <div class="filters" aria-label="Session filters">
-          <label class="filter-label">
+          <div class="filter-label">
             <span class="filter-label-text">Status</span>
-            <select id="filter-status" class="filter-select">
-              <option value="all">All</option>
-              <option value="active">Active</option>
-              <option value="expiring">Expiring Soon</option>
-              <option value="expired">Expired</option>
-            </select>
-          </label>
+            <details class="agency-filter" id="status-filter">
+              <summary class="agency-filter-trigger" id="status-filter-label">
+                All
+              </summary>
+              <div class="agency-filter-menu">
+                <label class="agency-filter-option">
+                  <input type="checkbox" value="all" data-status-filter="all" checked />
+                  All
+                </label>
+                <label class="agency-filter-option">
+                  <input type="checkbox" value="active" data-status-filter="tag" />
+                  Active
+                </label>
+                <label class="agency-filter-option">
+                  <input type="checkbox" value="expiring" data-status-filter="tag" />
+                  Expiring Soon
+                </label>
+                <label class="agency-filter-option">
+                  <input type="checkbox" value="expired" data-status-filter="tag" />
+                  Expired
+                </label>
+              </div>
+            </details>
+          </div>
           <label class="filter-label">
             <span class="filter-label-text">Read</span>
             <select id="filter-read" class="filter-select">

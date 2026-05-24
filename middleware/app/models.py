@@ -16,6 +16,11 @@ class MessageDirection(StrEnum):
     OUTBOUND = "outbound"
 
 
+class DeliveryStatus(StrEnum):
+    DELIVERED = "delivered"
+    FAILED = "failed"
+
+
 class AgencyTag(StrEnum):
     FIRE = "fire"
     MEDICAL = "medical"
@@ -27,6 +32,9 @@ class Message(BaseModel):
     direction: MessageDirection
     text: str
     timestamp: datetime
+    delivery_status: DeliveryStatus | None = None
+    delivery_error: str | None = None
+    delivery_attempts: int | None = None
 
 
 class Session(BaseModel):
@@ -79,6 +87,7 @@ class PhoneSummary(BaseModel):
     timestamp: datetime | None = None
     last_inbound_at: datetime | None = None
     last_activity_at: datetime
+    last_message_direction: MessageDirection | None = None
     agency_tags: list[AgencyTag] = Field(default_factory=list)
 
 
@@ -106,6 +115,8 @@ class SessionDetail(BaseModel):
     previous_sessions: list[SessionBlock] = Field(default_factory=list)
     is_reply_target: bool = False
     agency_tags: list[AgencyTag] = Field(default_factory=list)
+    outbound_delivery_failure: str | None = None
+    latest_outbound_delivery_status: DeliveryStatus | None = None
 
 
 class SessionTagsRequest(BaseModel):
@@ -118,12 +129,14 @@ class AgentReplyRequest(BaseModel):
     """POST /sessions/{id}/reply"""
 
     text: str = Field(min_length=1)
+    timestamp: datetime | None = None
 
 
 class AgentReplyResponse(BaseModel):
     success: bool
     error: str | None = None
     delivery_attempts: int = 0
+    duplicate: bool = False
 
 
 class ConsoleConfig(BaseModel):
