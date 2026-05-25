@@ -127,18 +127,10 @@ def check_services() -> str | None:
 
 
 def scenario_phone(scenario_id: str) -> str:
-    """+1 + 6 digits + 4-digit suffix (scenario 1 → …1111, 10 → …1010, 11 → …1011)."""
+    """+1 + 6-digit prefix + 4-digit scenario suffix (1 → …0001, 11 → …0011)."""
     n = int(scenario_id)
-    if n < 10:
-        suffix = int(str(n) * 4)
-    elif n == 10:
-        suffix = 1010
-    elif n == 11:
-        suffix = 1011
-    else:
-        suffix = int(f"{n:04d}")
-    middle = random.randint(200000, 999999)
-    return f"+1{middle}{suffix:04d}"
+    prefix = 555123  # fixed NXX block for stable demo callers
+    return f"+1{prefix}{n:04d}"
 
 
 def random_address(rng: random.Random | None = None) -> str:
