@@ -101,30 +101,7 @@ These additions prioritize operator clarity, lifecycle visibility, and determini
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  subgraph handset [Subscriber]
-    User[SMS to 911]
-  end
-  subgraph northstar [Northstar Telecom]
-    NS_IN[Inbound webhook]
-    NS_OUT[Outbound SMS API]
-  end
-  subgraph poc [This POC]
-    MW[Middleware :8000]
-    Mock[Mock Northstar :8001]
-    UI[Agent console /console]
-    Harness[simulate.py]
-  end
-  User --> NS_IN
-  Harness -->|POST /inbound| MW
-  NS_IN -.->|simulated| Harness
-  MW -->|POST /messages| Mock
-  Mock -.-> NS_OUT
-  UI -->|poll + reply| MW
-```
-
-
+![System architecture](docs/system-architecture.png)
 
 **Process layout**
 
@@ -297,15 +274,16 @@ python -m pytest tests -q
 
 ## Production: what we’d add next
 
-Ordered by typical carrier rollout:
-
-1. **Persistent store** (Postgres/Dynamo) with phone + session indexes and idempotency keys as unique constraints.
-2. **Auth** — mTLS or signed webhooks from Northstar; agent SSO for the console.
-3. **Background expiry** and metrics (session age, delivery latency, retry counts).
-4. **Real-time push** — SSE/WebSocket instead of 2s polling.
-5. **Observability** — structured logs, trace IDs across inbound → outbound, dashboards for PSAP operations.
-6. **Config per tenant** — TTL, retry policy, and short codes via admin API.
-7. **HA deployment** — stateless middleware replicas, sticky sessions or external store; no in-process global state.
+1. **Device geolocation metadata** to improve caller routing and dispatch awareness.
+2. **AI-assisted summaries** of prior sessions to improve repeat-caller continuity and reduce operator cognitive load.
+3. **Reporting and analytics exports** for session metrics, agency activity, operator workflows, and date-range reporting.
+4. **Persistent storage** using Postgres/Dynamo with phone + session indexes and idempotency keys as unique constraints.
+5. **Authentication** with mTLS or signed webhooks from Northstar and agent SSO for the console.
+6. **Background expiry and metrics** for session age, delivery latency, and retry counts.
+7. **Real-time push** using SSE/WebSockets instead of 2-second polling.
+8. **Observability** with structured logs, trace IDs across inbound → outbound, and PSAP operations dashboards.
+9. **Tenant-specific configuration** for TTL, retry policy, and short codes.
+10. **HA deployment** with stateless middleware replicas and external session storage.
 
 ---
 
